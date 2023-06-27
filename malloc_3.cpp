@@ -93,7 +93,7 @@ public:
             for(int i = 0; i < 32; i++)
             {
                 MMData* newNodeMM = (MMData*) ((i * 128 * 1024) + (char*)alignedPb);
-                *(MMData*)newNodeMM = (MMData){global_cookie, 128*1024 - sizeof(newNodeMM), true, MAX_ORDER - 1, NULL, previous, NULL, previous};
+                *(MMData*)newNodeMM = (MMData){global_cookie, 128*1024 - sizeof(MMData), true, MAX_ORDER - 1, NULL, previous, NULL, previous};
 
                 if( i == 0 )
                 {
@@ -173,6 +173,11 @@ int findIndex(size_t size)
             return i;
         }
         comparisonSize *= 2;
+    }
+
+    if (size <= comparisonSize - sizeof(MMData))
+    {
+        return MAX_ORDER - 1;
     }
 
     return -1;
@@ -262,5 +267,8 @@ int main()
     int* arr = (int*)smalloc(sizeof(int) * 4);
     int* arr2 = (int*)smalloc(sizeof(int) * 4);
 
+    size_t y = 128* 1024 - 56;
+
+    int* arr3 = (int*)smalloc(y);
     return 0;
 }
