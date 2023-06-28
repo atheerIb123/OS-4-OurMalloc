@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <iostream>
+#include <sys/mman.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -7,6 +8,7 @@
 #define MAXSIZE 100000000
 #define ALLOC_SIZE 32*128*1024
 #define MAX_ORDER 10
+#define LARGE_BLOCK 128 * 1024
 
 int global_cookie = rand();
 
@@ -81,6 +83,40 @@ public:
         newNode->prevInHist = lastNode;
     }
 
+    void removeBlockFromHist(MMData* to_delete)
+    {
+        MMData* current = this->head;
+        MMData* prev = NULL;
+
+        while(current != NULL)
+        {
+            if(current->cookie != global_cookie)
+            {
+                exit(0xdeadbeef);
+            }
+
+            if(current == to_delete)
+            {
+                if(prev == NULL)
+                {
+                    removeHead();
+                }
+                else
+                {
+                    prev->nextInHist = current->nextInHist;
+
+                    if (current->nextInHist)
+                    {
+                        current->nextInHist->prevInHist = prev;
+                    }
+                }
+            }
+
+            prev = current;
+            current = current->nextInHist;
+        }
+    }
+
     void initMemory()
     {
         if (this->unassigned)
@@ -144,6 +180,8 @@ public:
     MMDataList& operator[](int index);
     MMData* findOptimalBlock(size_t size);
     void split(int index, int numOfSplits);
+    MMData* mmapAllocation(size_t size);
+    void freeBlock(void* ptr);
 };
 
 MMDataDS::MMDataDS() : memoryBlocks()
@@ -183,6 +221,14 @@ int findIndex(size_t size)
     return -1;
 }
 
+MMData* getBuddyBlock(MMData* current)
+{
+    uintptr_t intptr1 = reinterpret_cast<uintptr_t>(current);
+    uintptr_t xorResult = intptr1 ^ (uintptr_t)(pow(2, current->order) * 128);
+    MMData* buddy = reinterpret_cast<MMData*>(xorResult);
+
+    return buddy;
+}
 
 void MMDataDS::split(int index, int numOfSplits)
 {
@@ -191,12 +237,10 @@ void MMDataDS::split(int index, int numOfSplits)
 
     for (int i = 0; i < numOfSplits; i++)
     {
-        uintptr_t intptr1 = reinterpret_cast<uintptr_t>(current);
-        uintptr_t xorResult = intptr1 ^ (uintptr_t)(pow(2, current->order) * 128);
-        buddy = reinterpret_cast<MMData*>(xorResult);
-        size_t power = pow(2, current->order - 1);
-        *(MMData*) buddy = (MMData){global_cookie, 128 * power - sizeof(buddy), true, current->order - 1, NULL, NULL, NULL, NULL};
         current->order -= 1;
+        buddy = getBuddyBlock(current);
+        size_t power = pow(2, current->order - 1);
+        *(MMData*) buddy = (MMData){global_cookie, 128 * power - sizeof(buddy), true, current->order, NULL, NULL, NULL, NULL};
         buddy->next = current->next;
         if (current->next != NULL)
         {
@@ -217,6 +261,7 @@ MMData* MMDataDS::findOptimalBlock(size_t size)
     {
         MMData* current = hist[index].removeHead();
         current->is_free = false;
+        current->size = size;
         return current;
     }
     else
@@ -234,7 +279,78 @@ MMData* MMDataDS::findOptimalBlock(size_t size)
     MMData* returnedAddress = hist[index].removeHead();
     returnedAddress->size = size;
 
+    returnedAddress->is_free = false;
     return returnedAddress;
+}
+
+MMData* MMDataDS::mmapAllocation(size_t size)
+{
+    void* allocated_block = mmap(NULL, sizeof(MMData) + size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+    if (allocated_block == MAP_FAILED)
+    {
+        return NULL;
+    }
+
+    MMData* allocatedMMap = (MMData*)allocated_block;
+    allocatedMMap->is_free = false;
+    allocatedMMap->cookie = global_cookie;
+    allocatedMMap->size = size;
+
+    return allocatedMMap;
+}
+
+void MMDataDS::freeBlock(void *ptr)
+{
+    MMData* to_remove = (MMData*)((char*)ptr - sizeof(MMData));
+
+    if(to_remove->is_free)
+    {
+        return;
+    }
+
+    to_remove->is_free = true;
+
+    if (to_remove->size > LARGE_BLOCK - sizeof(MMData))
+    {
+        munmap(to_remove, sizeof(MMData) + to_remove->size);
+    }
+    else
+    {
+        MMData* buddy = getBuddyBlock(to_remove);
+
+        if (buddy->is_free == false)
+        {
+            hist[to_remove->order].addNode(to_remove);
+            return;
+        }
+
+        if (to_remove > buddy)
+        {
+            MMData* temp = buddy;
+            buddy = to_remove;
+            to_remove = temp;
+        }
+
+        while (buddy->is_free)
+        {
+            hist[to_remove->order].removeBlockFromHist(buddy);
+            hist[to_remove->order].removeBlockFromHist(to_remove);
+
+            to_remove->next = buddy->next;
+
+            if (buddy->next)
+            {
+                buddy->next->prev = to_remove;
+            }
+
+
+            hist[to_remove->order + 1].addNode(to_remove);
+
+            to_remove->order += 1;
+            buddy = getBuddyBlock(to_remove);
+        }
+    }
 }
 
 size_t alignSize(size_t value, size_t alignment)
@@ -254,21 +370,68 @@ size_t alignSize(size_t value, size_t alignment)
     return value + padding;
 }
 
-MMDataDS x = MMDataDS();
+MMDataDS buddyAllocator = MMDataDS();
 
 void* smalloc(size_t size)
 {
-    size_t sizeMD = sizeof(MMData);
-    return (void*)((char*)x.findOptimalBlock(size) + (sizeof(MMData)));
+    if (size > MAXSIZE)
+        return NULL;
+
+    if (size == 0)
+        return NULL;
+
+    void* block;
+
+    if(size > LARGE_BLOCK - sizeof(MMData))
+    {
+        block = (void*)((char*)buddyAllocator.mmapAllocation(size) + (sizeof(MMData)));
+    }
+    else
+    {
+        block = (void*)((char*)buddyAllocator.findOptimalBlock(size) + (sizeof(MMData)));
+    }
+
+    return block;
 }
+
+void sfree(void* p)
+{
+    if (p == NULL)
+    {
+        return;
+    }
+
+    buddyAllocator.freeBlock(p);
+}
+
+void* scalloc(size_t num, size_t size)
+{
+    size_t total_bytes = num * size;
+
+    if (num * size > MAXSIZE || num * size == 0)
+    {
+        return NULL;
+    }
+
+    void* allocatedBlock = smalloc(total_bytes);
+
+    return memset(allocatedBlock, 0, total_bytes);
+}
+
+
 
 int main()
 {
     int* arr = (int*)smalloc(sizeof(int) * 4);
     int* arr2 = (int*)smalloc(sizeof(int) * 4);
 
-    size_t y = 128* 1024 - 56;
+    size_t y = 128* 1024;
 
     int* arr3 = (int*)smalloc(y);
+
+    sfree(arr);
+    sfree(arr2);
+    sfree(arr3);
+
     return 0;
 }
