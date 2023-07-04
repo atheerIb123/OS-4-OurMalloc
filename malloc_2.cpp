@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <iostream>
 #include <stdio.h>
 #include <string.h>
 
@@ -19,7 +20,7 @@ private:
     size_t numberOfNodes;
     MMData* head;
 public:
-    MMDataList() : head(NULL), numberOfNodes(0){}
+    MMDataList() : numberOfNodes(0), head(NULL){}
 
     void* allocateBlock(size_t size);
     void freeMemBlock(void* ptr);
@@ -70,13 +71,13 @@ void* MMDataList::allocateBlock(size_t size)
         {
             void* newNode = sbrk(size);
 
-            if(newNode ==(void*)(-1))
+            if(newNode == (void*)(-1))
             {
                 return NULL;
             }
 
             MMData* newNodeMM = (MMData*) newNode;
-            *(MMData*)newNodeMM = (MMData){size, false, NULL, previous};
+            *(MMData*)newNodeMM = {size, false, NULL, previous};
 
             previous->next = newNodeMM;
             this->numberOfNodes++;
@@ -86,10 +87,12 @@ void* MMDataList::allocateBlock(size_t size)
         {
             current->is_free = false;
             current->size = size;
+            return current;
         }
     }
-}
 
+    return nullptr;
+}
 void MMDataList::freeMemBlock(void *ptr)
 {
     MMData* metadata = (MMData*)((char*)ptr - sizeof(MMData));
@@ -107,6 +110,7 @@ size_t MMDataList::getNumOfFreeBlocks()
         {
             amount++;
         }
+        current = current->next;
     }
 
     return amount;
@@ -123,6 +127,7 @@ size_t MMDataList::getNumOfFreeBytes()
         {
             amount += current->size;
         }
+        current = current->next;
     }
 
     return amount;
@@ -130,7 +135,19 @@ size_t MMDataList::getNumOfFreeBytes()
 
 size_t MMDataList::getNumOfAllocations()
 {
-    return this->numberOfNodes;
+    MMData* current = this->head;
+    size_t amount = 0;
+
+    while(current != NULL)
+    {
+        if(!current->is_free)
+        {
+            amount++;
+        }
+        current = current->next;
+    }
+
+    return amount;
 }
 
 size_t MMDataList::getNumberOfAllocatedBytes()
@@ -140,7 +157,11 @@ size_t MMDataList::getNumberOfAllocatedBytes()
 
     while(current != NULL)
     {
-        amount += current->size;
+        if(current->is_free)
+        {
+            amount += current->size;
+        }
+        current = current->next;
     }
 
     return amount;
@@ -222,7 +243,7 @@ size_t _num_free_bytes()
 
 size_t _num_allocated_blocks()
 {
-    return memoryBlocks.getNumberOfAllocatedBytes();
+    return memoryBlocks.getNumOfAllocations();
 }
 
 size_t _num_meta_data_bytes()
@@ -233,4 +254,8 @@ size_t _num_meta_data_bytes()
 size_t _size_meta_data()
 {
     return sizeof(MMData);
+}
+size_t _num_allocated_bytes()
+{
+    return memoryBlocks.getNumberOfAllocatedBytes();
 }
