@@ -11,6 +11,10 @@
 #define LARGE_BLOCK 128 * 1024
 
 int global_cookie = rand();
+
+size_t numOfAllocs = 0;
+size_t numOfBytes = 0;
+
 int findIndex(size_t size);
 struct MallocMetadata {
     int cookie;
@@ -21,6 +25,7 @@ struct MallocMetadata {
     MallocMetadata* prev;
     MallocMetadata* nextInHist;
     MallocMetadata* prevInHist;
+
 }; typedef struct MallocMetadata MMData;
 
 size_t alignSize(size_t value, size_t alignment);
@@ -32,7 +37,14 @@ private:
     bool unassigned;
     MMData* head;
 public:
-    MMDataList() : head(NULL), unassigned(true){}
+    size_t getNumOfFreeBlocks();
+    size_t getNumOfFreeBytes();
+    size_t getNumOfAllocations();
+    size_t getNumberOfAllocatedBytes();
+    size_t getNumOfFreeBlocksHist();
+
+    MMDataList() : unassigned(true), head(NULL) {}
+
     MMData* removeHead()
     {
         MMData* temp = head;
@@ -143,7 +155,7 @@ public:
             for(int i = 0; i < 32; i++)
             {
                 MMData* newNodeMM = (MMData*) ((i * 128 * 1024) + (char*)alignedPb);
-                *(MMData*)newNodeMM = (MMData){global_cookie, 128*1024 - sizeof(MMData), true, MAX_ORDER - 1, NULL, previous, NULL, previous};
+                *(MMData*)newNodeMM = {global_cookie, 128*1024 - sizeof(MMData), true, MAX_ORDER - 1, NULL, previous, NULL, previous};
 
                 if( i == 0 )
                 {
@@ -160,11 +172,41 @@ public:
         }
     }
 
-    size_t getNumOfFreeBlocksHist();
-    size_t getNumOfFreeBytes();
-    size_t getNumOfAllocations();
-    size_t getNumberOfAllocatedBytes();
 };
+
+size_t MMDataList::getNumOfFreeBlocks()
+{
+    int cnt = 0;
+    MMData* current = head;
+    while(current != NULL)
+    {
+        if(current->is_free)
+            cnt++;
+        current = current->next;
+    }
+    return cnt;
+}
+size_t MMDataList::getNumOfFreeBytes()
+{
+    size_t cnt = 0;
+    MMData* current = head;
+    while(current != NULL)
+    {
+        if(current->is_free)
+            cnt += pow(2, current->order)*128 - sizeof(MMData);
+        current = current->next;
+    }
+    return cnt;
+}
+
+size_t MMDataList::getNumOfAllocations()
+{
+    return numOfAllocs;
+}
+
+size_t MMDataList::getNumberOfAllocatedBytes() {
+    return numOfBytes;
+}
 
 size_t MMDataList::getNumOfFreeBlocksHist()
 {
@@ -173,6 +215,8 @@ size_t MMDataList::getNumOfFreeBlocksHist()
 
     while(current != NULL)
     {
+        if(current->cookie != global_cookie)
+            exit(0xDEADBEAF);
         if(current->is_free)
         {
             amount++;
@@ -198,6 +242,16 @@ public:
     MMData* mmapAllocation(size_t size);
     void freeBlock(void* ptr);
 
+    size_t getNumOfFreeBlocks()
+    {
+        return memoryBlocks.getNumOfFreeBlocks();
+    }
+
+    size_t getNumOfFreeBytes()
+    {
+        return memoryBlocks.getNumberOfAllocatedBytes();
+    }
+
     MMData* getBuddyBlock(MMData* current);
 };
 
@@ -207,7 +261,6 @@ MMDataDS::MMDataDS() : memoryBlocks()
     hist[MAX_ORDER - 1] = memoryBlocks;
     blocksCountHist[MAX_ORDER - 1] = 32;
 }
-
 
 void* MMDataDS::mergeBuddies(MMData* block, size_t sizeNeeded)
 {
@@ -221,6 +274,8 @@ void* MMDataDS::mergeBuddies(MMData* block, size_t sizeNeeded)
     currentOrder = block->order;
     while(getBuddyBlock(block) != NULL)
     {
+        if(block->cookie != global_cookie)
+            exit(0xDEADBEAF);
         if(pow(++block->order, 2)*128 >= sizeNeeded)
             break;
         countMerges++;
@@ -248,7 +303,7 @@ void* MMDataDS::mergeBuddies(MMData* block, size_t sizeNeeded)
         block->order++;
     }
 
-
+    return block;
 }
 
 MMDataList& MMDataDS::operator[](int index)
@@ -257,6 +312,7 @@ MMDataList& MMDataDS::operator[](int index)
     {
         return hist[index];
     }
+    return hist[0];
 }
 
 int findIndex(size_t size)
@@ -292,7 +348,6 @@ MMData* MMDataDS::getBuddyBlock(MMData *current)
     return buddy;
 }
 
-
 MMData* getBuddyBlockNoNULL(MMData *current)
 {
     uintptr_t intptr1 = reinterpret_cast<uintptr_t>(current);
@@ -302,6 +357,7 @@ MMData* getBuddyBlockNoNULL(MMData *current)
 
     return buddy;
 }
+
 void MMDataDS::split(int index, int numOfSplits)
 {
     MMData* current = hist[index].removeHead();
@@ -309,10 +365,12 @@ void MMDataDS::split(int index, int numOfSplits)
 
     for (int i = 0; i < numOfSplits; i++)
     {
+        if(current->cookie != global_cookie)
+            exit(0xDEADBEAF);
         current->order -= 1;
         buddy = getBuddyBlockNoNULL(current);
         size_t power = pow(2, current->order - 1);
-        *(MMData*) buddy = (MMData){global_cookie, 128 * power - sizeof(buddy), true, current->order, NULL, NULL, NULL, NULL};
+        *(MMData*) buddy = {global_cookie, 128 * power - sizeof(buddy), true, current->order, NULL, NULL, NULL, NULL};
         buddy->next = current->next;
         if (current->next != NULL)
         {
@@ -332,6 +390,8 @@ MMData* MMDataDS::findOptimalBlock(size_t size)
     if (hist[index].getNumOfFreeBlocksHist() > 0)
     {
         MMData* current = hist[index].removeHead();
+        if(current->cookie != global_cookie)
+            exit(0xDEADBEAF);
         current->is_free = false;
         current->size = size;
         return current;
@@ -382,7 +442,8 @@ void MMDataDS::freeBlock(void *ptr)
     }
 
     to_remove->is_free = true;
-
+    numOfAllocs--;
+    numOfBytes -= to_remove->size;
     if (to_remove->size > LARGE_BLOCK - sizeof(MMData))
     {
         munmap(to_remove, sizeof(MMData) + to_remove->size);
@@ -462,6 +523,8 @@ void* smalloc(size_t size)
     {
         block = (void*)((char*)buddyAllocator.findOptimalBlock(size) + (sizeof(MMData)));
     }
+    numOfAllocs++;
+    numOfBytes += size;
     return block;
 }
 
@@ -541,4 +604,34 @@ int main()
 
 
     return 0;
+}
+
+size_t _num_free_blocks()
+{
+    return buddyAllocator.getNumOfFreeBlocks();
+}
+
+size_t _num_free_bytes()
+{
+    return buddyAllocator.getNumOfFreeBytes();
+}
+
+size_t _num_allocated_blocks()
+{
+    return numOfAllocs;
+}
+
+size_t _num_meta_data_bytes()
+{
+    return _num_allocated_blocks() * sizeof(MMData);
+}
+
+size_t _num_allocated_bytes()
+{
+    return numOfBytes;
+}
+
+size_t _size_meta_data()
+{
+    return sizeof(MMData);
 }
