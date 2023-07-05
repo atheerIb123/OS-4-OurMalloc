@@ -5,6 +5,7 @@
 
 
 #define MAXSIZE 100000000
+int ALLOCATEDBYTES = 0;
 
 
 struct MallocMetadata {
@@ -25,7 +26,7 @@ public:
     void* allocateBlock(size_t size);
     void freeMemBlock(void* ptr);
     size_t getNumOfFreeBlocks();
-    size_t getNumOfFreeBytes();
+    size_t getNumFreeBytes();
     size_t getNumOfAllocations();
     size_t getNumberOfAllocatedBytes();
 };
@@ -35,7 +36,7 @@ void* MMDataList::allocateBlock(size_t size)
 {
     if(this->head == NULL)
     {
-        intptr_t incrementation = size + sizeof(MMData);
+        size_t incrementation = size + sizeof(MMData);
         void* allocated = sbrk(incrementation);
 
         if (allocated == (void*)(-1))
@@ -43,10 +44,12 @@ void* MMDataList::allocateBlock(size_t size)
             return NULL;
         }
 
+
         MMData * allocatedMM = (MMData *) allocated;
 
         allocatedMM->size = size;
         allocatedMM->is_free = false;
+        ALLOCATEDBYTES += size;
         allocatedMM->next = NULL;
         allocatedMM->prev = NULL;
 
@@ -60,8 +63,14 @@ void* MMDataList::allocateBlock(size_t size)
         MMData* current = this->head;
         MMData* previous = NULL;
 
-        while (current != NULL && !current->is_free && current->size < size)
+        while (current != NULL)
         {
+            if(current->is_free && current->size >= size)
+            {
+                current->is_free = false;
+                current->size = size;
+                return current;
+            }
             previous = current;
             current = current->next;
         }
@@ -69,25 +78,20 @@ void* MMDataList::allocateBlock(size_t size)
 
         if(current == NULL)
         {
-            void* newNode = sbrk(size);
+            void* newNode = sbrk(size + sizeof(MMData));
 
             if(newNode == (void*)(-1))
             {
                 return NULL;
             }
 
+            ALLOCATEDBYTES += size;
             MMData* newNodeMM = (MMData*) newNode;
             *(MMData*)newNodeMM = {size, false, NULL, previous};
 
             previous->next = newNodeMM;
             this->numberOfNodes++;
             return newNode;
-        }
-        else //Found a node that has isfree = true and is allocated
-        {
-            current->is_free = false;
-            current->size = size;
-            return current;
         }
     }
 
@@ -107,16 +111,14 @@ size_t MMDataList::getNumOfFreeBlocks()
     while(current != NULL)
     {
         if(current->is_free)
-        {
             amount++;
-        }
         current = current->next;
     }
 
     return amount;
 }
 
-size_t MMDataList::getNumOfFreeBytes()
+size_t MMDataList::getNumFreeBytes()
 {
     size_t amount = 0;
     MMData* current = this->head;
@@ -140,10 +142,7 @@ size_t MMDataList::getNumOfAllocations()
 
     while(current != NULL)
     {
-        if(!current->is_free)
-        {
-            amount++;
-        }
+        amount++;
         current = current->next;
     }
 
@@ -177,7 +176,7 @@ void* smalloc(size_t size)
     if (size == 0)
         return NULL;
 
-    return memoryBlocks.allocateBlock(size);
+    return (void*)((char*)memoryBlocks.allocateBlock(size) + sizeof(MMData));
 }
 
 void* scalloc(size_t num, size_t size)
@@ -238,7 +237,7 @@ size_t _num_free_blocks()
 
 size_t _num_free_bytes()
 {
-    return memoryBlocks.getNumOfFreeBytes();
+    return memoryBlocks.getNumFreeBytes();
 }
 
 size_t _num_allocated_blocks()
@@ -253,9 +252,10 @@ size_t _num_meta_data_bytes()
 
 size_t _size_meta_data()
 {
-    return sizeof(MMData);
+    size_t mmdata_size = sizeof(MallocMetadata);
+    return mmdata_size;
 }
 size_t _num_allocated_bytes()
 {
-    return memoryBlocks.getNumberOfAllocatedBytes();
+    return ALLOCATEDBYTES;
 }
