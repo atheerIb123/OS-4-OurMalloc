@@ -7,15 +7,14 @@
 
 #define MAXSIZE 100000000
 #define ALLOC_SIZE 32*128*1024
-#define MAX_ORDER 10
+#define MAX_ORDER 11
 #define LARGE_BLOCK 128 * 1024
 
 int global_cookie = rand();
 
-size_t numOfAllocs = 0;
-size_t numOfBytes = 0;
-
 int findIndex(size_t size);
+int mmapAllocs = 0;
+
 struct MallocMetadata {
     int cookie;
     size_t size;
@@ -29,6 +28,7 @@ struct MallocMetadata {
 }; typedef struct MallocMetadata MMData;
 
 size_t alignSize(size_t value, size_t alignment);
+size_t numOfBytes = 32*(128*1024 - sizeof(MMData));
 
 
 class MMDataList
@@ -118,7 +118,7 @@ public:
         {
             if(current->cookie != global_cookie)
             {
-                exit(0xdeadbeef);
+                exit(0xDEADBEEF);
             }
 
             if(current == to_delete)
@@ -176,36 +176,61 @@ public:
 
 size_t MMDataList::getNumOfFreeBlocks()
 {
-    int cnt = 0;
+    size_t cnt = 0;
     MMData* current = head;
     while(current != NULL)
     {
+        if(current->cookie != global_cookie)
+        {
+            exit(0xDEADBEEF);
+        }
         if(current->is_free)
             cnt++;
         current = current->next;
     }
     return cnt;
 }
+
 size_t MMDataList::getNumOfFreeBytes()
 {
     size_t cnt = 0;
     MMData* current = head;
+
     while(current != NULL)
     {
-        if(current->is_free)
+        if (current->is_free)
             cnt += pow(2, current->order)*128 - sizeof(MMData);
         current = current->next;
     }
+
     return cnt;
 }
 
 size_t MMDataList::getNumOfAllocations()
 {
-    return numOfAllocs;
+    size_t cnt = 0;
+    MMData* current = head;
+    while(current != NULL)
+    {
+        cnt++;
+        current = current->next;
+    }
+
+    return cnt;
 }
 
-size_t MMDataList::getNumberOfAllocatedBytes() {
-    return numOfBytes;
+size_t MMDataList::getNumberOfAllocatedBytes()
+{
+    MMData* current = this->head;
+    size_t amount = 0;
+
+    while(current != NULL)
+    {
+        amount++;
+        current = current->next;
+    }
+
+    return amount;
 }
 
 size_t MMDataList::getNumOfFreeBlocksHist()
@@ -249,7 +274,12 @@ public:
 
     size_t getNumOfFreeBytes()
     {
-        return memoryBlocks.getNumberOfAllocatedBytes();
+        return memoryBlocks.getNumOfFreeBytes();
+    }
+
+    size_t getAllocs()
+    {
+        return memoryBlocks.getNumOfAllocations();
     }
 
     MMData* getBuddyBlock(MMData* current);
@@ -363,23 +393,32 @@ void MMDataDS::split(int index, int numOfSplits)
     MMData* current = hist[index].removeHead();
     MMData* buddy;
 
+    if(numOfSplits == 0)
+    {
+        numOfSplits++;
+    }
     for (int i = 0; i < numOfSplits; i++)
     {
         if(current->cookie != global_cookie)
             exit(0xDEADBEAF);
         current->order -= 1;
         buddy = getBuddyBlockNoNULL(current);
-        size_t power = pow(2, current->order - 1);
+        size_t power = pow(2, current->order);
         *(MMData*) buddy = {global_cookie, 128 * power - sizeof(buddy), true, current->order, NULL, NULL, NULL, NULL};
+
         buddy->next = current->next;
         if (current->next != NULL)
         {
             current->next->prev = buddy;
-            current->next = buddy;
         }
+        current->next = buddy;
         buddy->prev = current;
+
+
         hist[current->order].addNode(buddy);
     }
+
+
 
     hist[current->order].addNode(current);
 }
@@ -387,6 +426,8 @@ void MMDataDS::split(int index, int numOfSplits)
 MMData* MMDataDS::findOptimalBlock(size_t size)
 {
     int index = findIndex(size);
+    bool flag = false;
+
     if (hist[index].getNumOfFreeBlocksHist() > 0)
     {
         MMData* current = hist[index].removeHead();
@@ -402,12 +443,17 @@ MMData* MMDataDS::findOptimalBlock(size_t size)
         {
             if (hist[i].getNumOfFreeBlocksHist() > 0)
             {
+                flag = true;
                 split(i, i - index);
                 break;
             }
         }
     }
 
+    if(flag == false)
+    {
+        return NULL;
+    }
     MMData* returnedAddress = hist[index].removeHead();
     returnedAddress->size = size;
 
@@ -442,11 +488,12 @@ void MMDataDS::freeBlock(void *ptr)
     }
 
     to_remove->is_free = true;
-    numOfAllocs--;
-    numOfBytes -= to_remove->size;
+
     if (to_remove->size > LARGE_BLOCK - sizeof(MMData))
     {
-        munmap(to_remove, sizeof(MMData) + to_remove->size);
+        munmap((void*)((char*)to_remove - sizeof(MMData)), sizeof(MMData) + to_remove->size);
+        numOfBytes -= to_remove->size;
+        mmapAllocs--;
     }
     else
     {
@@ -465,7 +512,7 @@ void MMDataDS::freeBlock(void *ptr)
             to_remove = temp;
         }
 
-        while (buddy->is_free)
+        while (buddy->is_free && buddy->order < 10)
         {
             hist[to_remove->order].removeBlockFromHist(buddy);
             hist[to_remove->order].removeBlockFromHist(to_remove);
@@ -504,9 +551,12 @@ size_t alignSize(size_t value, size_t alignment)
 }
 
 MMDataDS buddyAllocator = MMDataDS();
+bool smallocFlag = false;
 
 void* smalloc(size_t size)
 {
+    buddyAllocator.getNumOfFreeBlocks();
+    smallocFlag = true;
     if (size > MAXSIZE)
         return NULL;
 
@@ -518,18 +568,27 @@ void* smalloc(size_t size)
     if(size > LARGE_BLOCK - sizeof(MMData))
     {
         block = (void*)((char*)buddyAllocator.mmapAllocation(size) + (sizeof(MMData)));
+        numOfBytes += size;
+        mmapAllocs++;
     }
     else
     {
-        block = (void*)((char*)buddyAllocator.findOptimalBlock(size) + (sizeof(MMData)));
+        void* block2 = buddyAllocator.findOptimalBlock(size);
+        if(!block2)
+        {
+            return NULL;
+        }
+
+        block = (void*)((char*)block2 + (sizeof(MMData)));
     }
-    numOfAllocs++;
-    numOfBytes += size;
+
     return block;
 }
 
 void sfree(void* p)
 {
+    buddyAllocator.getNumOfFreeBlocks();
+
     if (p == NULL)
     {
         return;
@@ -554,6 +613,8 @@ void* scalloc(size_t num, size_t size)
 
 void* srealloc(void* oldp, size_t size)
 {
+    buddyAllocator.getNumOfFreeBlocks();
+
     if(size == 0 || size > MAXSIZE)
         return NULL;
 
@@ -561,6 +622,12 @@ void* srealloc(void* oldp, size_t size)
         return (smalloc(size));
 
     MMData* oldpMD = (MMData*)((char*)oldp - sizeof(MMData));
+
+    if(oldpMD->order == findIndex(size))
+    {
+        oldpMD->size = size;
+        return oldp;
+    }
 
     if(oldpMD->size + sizeof(MMData) > 128*1024) //mmapped block
     {
@@ -587,38 +654,34 @@ void* srealloc(void* oldp, size_t size)
     return NULL;
 }
 
-int main()
-{
-    int* arr = (int*)smalloc(sizeof(int) * 4);
-    srealloc(arr, 10);
-
-    /*
-    size_t y = 128* 1024;
-
-    int* arr3 = (int*)smalloc(y);
-
-    sfree(arr);
-    sfree(arr2);
-    sfree(arr3);
-*/
-
-
-    return 0;
-}
 
 size_t _num_free_blocks()
 {
+    if(smallocFlag == false)
+    {
+        return 0;
+    }
     return buddyAllocator.getNumOfFreeBlocks();
 }
 
 size_t _num_free_bytes()
 {
+    if(smallocFlag == false)
+    {
+        return 0;
+    }
+
     return buddyAllocator.getNumOfFreeBytes();
 }
 
 size_t _num_allocated_blocks()
 {
-    return numOfAllocs;
+    if(smallocFlag == false)
+    {
+        return 0;
+    }
+
+    return buddyAllocator.getAllocs() + mmapAllocs;
 }
 
 size_t _num_meta_data_bytes()
@@ -628,10 +691,21 @@ size_t _num_meta_data_bytes()
 
 size_t _num_allocated_bytes()
 {
-    return numOfBytes;
+    if(smallocFlag == false)
+    {
+        return 0;
+    }
+
+    return numOfBytes - (_num_allocated_blocks() - mmapAllocs - 32)*sizeof(MMData);
 }
 
 size_t _size_meta_data()
 {
     return sizeof(MMData);
+}
+int main()
+{
+    void* ptr1 = smalloc(40);
+    void* ptr2 = srealloc(ptr1, 128*pow(2,2) -64);
+
 }
