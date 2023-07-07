@@ -306,13 +306,16 @@ void* MMDataDS::mergeBuddies(MMData* block, size_t sizeNeeded)
     {
         if(block->cookie != global_cookie)
             exit(0xDEADBEAF);
-        if(pow(++block->order, 2)*128 >= sizeNeeded)
+        if(pow(2, ++block->order)*128 >= sizeNeeded)
+        {
+            countMerges++;
             break;
+        }
         countMerges++;
     }
 
 
-    if(getBuddyBlock(block) == NULL)
+    if( getBuddyBlock(block) == NULL)
         return NULL;
 
     block->order = currentOrder;
@@ -320,7 +323,8 @@ void* MMDataDS::mergeBuddies(MMData* block, size_t sizeNeeded)
 
     for(int i = 0; i < countMerges; i++)
     {
-        hist[getBuddyBlock(block)->order].removeBlockFromHist(getBuddyBlock(block));
+        buddy = getBuddyBlock(block);
+        hist[buddy->order].removeBlockFromHist(buddy);
 
         if(buddy->prev)
         {
@@ -372,7 +376,7 @@ MMData* MMDataDS::getBuddyBlock(MMData *current)
     uintptr_t xorResult = intptr1 ^ (uintptr_t)(pow(2, current->order) * 128);
     MMData* buddy = reinterpret_cast<MMData*>(xorResult);
 
-    if(!hist[findIndex(buddy->size)].getNode(buddy))
+    if(!hist[current->order].getNode(buddy))
         return NULL;
 
     return buddy;
@@ -623,7 +627,8 @@ void* srealloc(void* oldp, size_t size)
 
     MMData* oldpMD = (MMData*)((char*)oldp - sizeof(MMData));
 
-    if(oldpMD->order == findIndex(size))
+
+    if(oldpMD->order >= findIndex(size))
     {
         oldpMD->size = size;
         return oldp;
@@ -641,17 +646,17 @@ void* srealloc(void* oldp, size_t size)
     //not mmapped block
     MMData* buddy = buddyAllocator.getBuddyBlock(oldpMD);
 
-
-    if(!buddy || !buddyAllocator.mergeBuddies(oldpMD, size)) //oldP doesn't have buddies
+    void* retBlock = buddyAllocator.mergeBuddies(oldpMD, size);
+    if(!buddy || !retBlock) //oldP doesn't have buddies
     {
         sfree(oldp);
         void* newBlock_2 = smalloc(size);
-        MMData* newAllocated_2 = (MMData*)((char*)newBlock_2 - sizeof(MMData));
-        memcpy(newAllocated_2, oldp, oldpMD->size);
-        return newAllocated_2;
+        memcpy(newBlock_2, oldp, oldpMD->size);
+        return newBlock_2;
     }
 
-    return NULL;
+    memcpy((char*)retBlock+sizeof(MMData), oldp, oldpMD->size);
+    return (char*)retBlock+sizeof(MMData);
 }
 
 
@@ -702,10 +707,4 @@ size_t _num_allocated_bytes()
 size_t _size_meta_data()
 {
     return sizeof(MMData);
-}
-int main()
-{
-    void* ptr1 = smalloc(40);
-    void* ptr2 = srealloc(ptr1, 128*pow(2,2) -64);
-
 }
